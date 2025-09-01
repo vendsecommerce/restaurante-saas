@@ -1,223 +1,267 @@
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
 
 const app = express();
 
-// Configuração do CORS
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'https://seu-frontend.vercel.app',
-  credentials: true
-}));
-
+// Middleware
+app.use(cors());
 app.use(express.json());
 
-// Configuração do PostgreSQL
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+// Configuração do Supabase
+const supabaseUrl = process.env.SUPABASE_URL || 'https://hylixobjiyckxzedwmvj.supabase.co';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5bGl4b2JqaXlja3h6ZWR3bXZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY3NTIzNjUsImV4cCI6MjA3MjMyODM2NX0.aL5zgNORlafc3ZKKdE5O5F-iRkKUb58ZScEUTD_Mncs';
 
-// Middleware de logging
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  next();
-});
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Rotas das Mesas
-app.post('/api/mesas', async (req, res) => {
+// Rota de teste
+app.get('/api/health', async (req, res) => {
   try {
-    const { numero } = req.body;
-    const qrCode = `mesa-${numero}-${Date.now()}`;
+    // Testar conexão com Supabase
+    const { data, error } = await supabase
+      .from('mesas')
+      .select('count')
+      .limit(1);
     
-    const result = await pool.query(
-      'INSERT INTO mesas (numero, qr_code) VALUES ($1, $2) RETURNING *',
-      [numero, qrCode]
-    );
+    if (error) throw error;
     
-    res.json(result.rows[0]);
+    res.json({ status: 'OK', message: 'API funcionando com Supabase!', data });
   } catch (error) {
-    console.error('Erro ao criar mesa:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ status: 'ERROR', message: error.message });
   }
 });
 
+// Rota para cardápio
+app.get('/api/cardapio', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('cardapio')
+      .select('*')
+      .eq('disponivel', true)
+      .order('categoria', { ascending: true });
+    
+    if (error) throw error;
+    
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rota para mesas
 app.get('/api/mesas', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM mesas ORDER BY numero');
-    res.json(result.rows);
+    const { data, error } = await supabase
+      .from('mesas')
+      .select('*')
+      .order('numero', { ascending: true });
+    
+    if (error) throw error;
+    
+    res.json(data || []);
   } catch (error) {
-    console.error('Erro ao listar mesas:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Rotas do Cardápio
+// Rota para pedidos
+app.get('/api/pedidos', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('pedidos')
+      .select(`
+        *,
+        mesas(numero, qr_code)
+      `)
+      .order('criado_em', { ascending: false });
+    
+    if (error) throw error;
+    
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rota para criar pedido
+app.post('/api/pedidos', async (req, res) => {
+  try {
+    const { mesa_id, itens, total, observacoes } = req.body;
+    
+    // Criar pedido
+    const { data: pedido, error: pedidoError } = await supabase
+      .from('pedidos')
+      .insert({
+        mesa_id,
+        itens: itens || [],
+        total: total || 0,
+        observacoes,
+        status: 'pendente'
+      })
+      .select()
+      .single();
+    
+    if (pedidoError) throw pedidoError;
+    
+    // Atualizar status da mesa para ocupada
+    await supabase
+      .from('mesas')
+      .update({ status: 'ocupada' })
+      .eq('id', mesa_id);
+    
+    res.json({ id: pedido.id, message: 'Pedido criado com sucesso!' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rota para atualizar status do pedido
+app.put('/api/pedidos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ status })
+      .eq('id', id);
+    
+    if (error) throw error;
+    
+    res.json({ message: 'Status atualizado com sucesso!' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rota para liberar mesa
+app.put('/api/mesas/:id/liberar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Atualizar status da mesa
+    const { error: mesaError } = await supabase
+      .from('mesas')
+      .update({ status: 'livre' })
+      .eq('id', id);
+    
+    if (mesaError) throw mesaError;
+    
+    // Marcar pedidos da mesa como entregues
+    await supabase
+      .from('pedidos')
+      .update({ status: 'entregue' })
+      .eq('mesa_id', id)
+      .eq('status', 'pronto');
+    
+    res.json({ message: 'Mesa liberada com sucesso!' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rota para adicionar item ao cardápio
 app.post('/api/cardapio', async (req, res) => {
   try {
     const { nome, preco, categoria, descricao } = req.body;
-    const result = await pool.query(
-      'INSERT INTO cardapio (nome, preco, categoria, descricao) VALUES ($1, $2, $3, $4) RETURNING *',
-      [nome, preco, categoria, descricao]
-    );
-    res.json(result.rows[0]);
+    
+    const { data, error } = await supabase
+      .from('cardapio')
+      .insert({
+        nome,
+        preco,
+        categoria,
+        descricao,
+        disponivel: true
+      })
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    res.json(data);
   } catch (error) {
-    console.error('Erro ao adicionar item:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/cardapio', async (req, res) => {
+// Rota para criar mesa
+app.post('/api/mesas', async (req, res) => {
   try {
-    const { categoria, disponivel } = req.query;
-    let query = 'SELECT * FROM cardapio';
-    const params = [];
+    const { numero } = req.body;
+    const qr_code = `mesa-${numero}-${Date.now()}`;
     
-    if (categoria || disponivel) {
-      query += ' WHERE';
-      if (categoria) {
-        query += ' categoria = $1';
-        params.push(categoria);
-      }
-      if (disponivel !== undefined) {
-        if (params.length > 0) query += ' AND';
-        query += ` disponivel = $${params.length + 1}`;
-        params.push(disponivel === 'true');
-      }
-    }
+    const { data, error } = await supabase
+      .from('mesas')
+      .insert({
+        numero,
+        qr_code,
+        status: 'livre'
+      })
+      .select()
+      .single();
     
-    query += ' ORDER BY categoria, nome';
-    const result = await pool.query(query, params);
-    res.json(result.rows);
+    if (error) throw error;
+    
+    res.json(data);
   } catch (error) {
-    console.error('Erro ao listar cardápio:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Rotas dos Pedidos
-app.post('/api/pedidos', async (req, res) => {
-  const client = await pool.connect();
+// Middleware para capturar rotas não encontradas
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Rota não encontrada' });
+});
+
+// Middleware para tratamento de erros
+app.use((error, req, res, next) => {
+  console.error(error);
+  res.status(500).json({ error: 'Erro interno do servidor' });
+});
+
+// Exportar para Netlify Functions
+exports.handler = async (event, context) => {
+  // Converter evento do Netlify para request do Express
+  const request = {
+    method: event.httpMethod,
+    url: event.path,
+    headers: event.headers,
+    body: event.body ? JSON.parse(event.body) : {},
+    query: event.queryStringParameters || {}
+  };
+
+  // Simular response do Express
+  let responseBody = '';
+  let statusCode = 200;
+  let headers = {};
+
+  // Processar a requisição
   try {
-    await client.query('BEGIN');
-    
-    const { mesa_id, itens, observacoes } = req.body;
-    
-    // Criar pedido
-    const pedidoResult = await client.query(
-      'INSERT INTO pedidos (mesa_id, observacoes) VALUES ($1, $2) RETURNING *',
-      [mesa_id, observacoes]
-    );
-    
-    const pedido = pedidoResult.rows[0];
-    
-    // Adicionar itens
-    for (const item of itens) {
-      const itemResult = await client.query(
-        'SELECT preco FROM cardapio WHERE id = $1',
-        [item.item_id]
-      );
-      
-      if (itemResult.rows.length === 0) {
-        throw new Error(`Item ${item.item_id} não encontrado`);
-      }
-      
-      await client.query(
-        'INSERT INTO pedido_itens (pedido_id, item_id, quantidade, preco_unitario, observacoes) VALUES ($1, $2, $3, $4, $5)',
-        [pedido.id, item.item_id, item.quantidade, itemResult.rows[0].preco, item.observacoes]
-      );
+    // Aqui você pode adicionar lógica específica para cada rota
+    if (request.url === '/api/health') {
+      responseBody = JSON.stringify({ status: 'OK', message: 'API funcionando com Supabase!' });
+    } else if (request.url === '/api/cardapio') {
+      // Implementar lógica para cardápio
+      responseBody = JSON.stringify([]);
+    } else {
+      statusCode = 404;
+      responseBody = JSON.stringify({ error: 'Rota não encontrada' });
     }
-    
-    await client.query('COMMIT');
-    
-    // Buscar pedido completo
-    const pedidoCompleto = await client.query(
-      `SELECT p.*, m.numero as mesa_numero,
-        json_agg(
-          json_build_object(
-            'id', pi.id,
-            'quantidade', pi.quantidade,
-            'preco_unitario', pi.preco_unitario,
-            'observacoes', pi.observacoes,
-            'item', json_build_object(
-              'id', c.id,
-              'nome', c.nome,
-              'preco', c.preco,
-              'categoria', c.categoria
-            )
-          )
-        ) as itens
-      FROM pedidos p
-      JOIN mesas m ON p.mesa_id = m.id
-      JOIN pedido_itens pi ON p.id = pi.pedido_id
-      JOIN cardapio c ON pi.item_id = c.id
-      WHERE p.id = $1
-      GROUP BY p.id, m.numero`,
-      [pedido.id]
-    );
-    
-    res.json(pedidoCompleto.rows[0]);
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Erro ao criar pedido:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  } finally {
-    client.release();
+    statusCode = 500;
+    responseBody = JSON.stringify({ error: error.message });
   }
-});
 
-app.get('/api/pedidos', async (req, res) => {
-  try {
-    const { status, mesa_id } = req.query;
-    let query = `
-      SELECT p.*, m.numero as mesa_numero,
-        json_agg(
-          json_build_object(
-            'id', pi.id,
-            'quantidade', pi.quantidade,
-            'preco_unitario', pi.preco_unitario,
-            'observacoes', pi.observacoes,
-            'item', json_build_object(
-              'id', c.id,
-              'nome', c.nome,
-              'preco', c.preco,
-              'categoria', c.categoria
-            )
-          )
-        ) as itens
-      FROM pedidos p
-      JOIN mesas m ON p.mesa_id = m.id
-      JOIN pedido_itens pi ON p.id = pi.pedido_id
-      JOIN cardapio c ON pi.item_id = c.id
-    `;
-    
-    const params = [];
-    if (status || mesa_id) {
-      query += ' WHERE';
-      if (status) {
-        query += ' p.status = $1';
-        params.push(status);
-      }
-      if (mesa_id) {
-        if (params.length > 0) query += ' AND';
-        query += ` p.mesa_id = $${params.length + 1}`;
-        params.push(mesa_id);
-      }
-    }
-    
-    query += ' GROUP BY p.id, m.numero ORDER BY p.criado_em DESC';
-    const result = await pool.query(query, params);
-    res.json(result.rows);
-  } catch (error) {
-    console.error('Erro ao listar pedidos:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Rota de teste
-app.get('/api', (req, res) => {
-  res.json({ message: 'API do Restaurante funcionando!' });
-});
-
-// Exportar para Vercel
-module.exports = app;
+  return {
+    statusCode,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS'
+    },
+    body: responseBody
+  };
+};
